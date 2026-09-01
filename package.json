@@ -61,7 +61,7 @@
     "@types/oidc-provider": "^9.4.0",
     "openid-client": "^6.8.7",
     "tsx": "^4.20.6",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   }
 }
