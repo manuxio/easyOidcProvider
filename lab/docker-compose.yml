@@ -1,0 +1,110 @@
+# Active Directory laboratory for the auth-server (phase 2 of the OAuth2/Kerberos plan).
+#
+#   samba-dc    a real AD domain controller: KDC (88), LDAP/LDAPS (389/636) and the
+#               DNS server (53) of the lab zone lab.easyoidc.local
+#   krb-client  a throwaway Debian box with krb5 + ldap-utils + curl, used to run
+#               every verification from inside the lab network
+#
+# Nothing is published to the host: the machine this runs on is a production
+# dialer and its port space is crowded. Reach the lab from krb-client instead.
+#
+# The subnet is declared explicitly and on purpose: Docker's default address pool
+# on this host overlaps the production PBX network 172.19.132.0/24.
+
+name: auth-lab
+
+networks:
+  lab:
+    name: auth-lab
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.10.0/24
+          gateway: 172.28.10.1
+
+volumes:
+  # Domain database, keytabs and sysvol. Survives `docker compose down`;
+  # removed only by `docker compose down -v` (see reset.sh).
+  samba-lib:
+  samba-etc:
+
+services:
+  samba-dc:
+    build:
+      context: ./dc
+    image: auth-lab/samba-dc:latest
+    container_name: auth-lab-dc
+    # Short hostname only: `domainname:` writes the sysctl kernel.domainname, which
+    # rootless Docker is not allowed to touch. The FQDN comes from extra_hosts below
+    # and, for every other member of the lab, from the DNS zone samba serves.
+    hostname: dc1
+    extra_hosts:
+      - "dc1.lab.easyoidc.local:172.28.10.10"
+      - "auth.lab.easyoidc.local:172.28.10.20"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      SAMBA_REALM: LAB.EASYOIDC.LOCAL
+      SAMBA_NETBIOS_DOMAIN: LAB
+      SAMBA_ADMIN_PASSWORD: ${LAB_ADMIN_PASSWORD:-Admin.Passw0rd!}
+      SAMBA_DEBUG_LEVEL: ${LAB_SAMBA_DEBUG_LEVEL:-1}
+      # Values below are read by dc/provision-objects.sh through `compose exec`.
+      LAB_USER_PASSWORD: ${LAB_USER_PASSWORD:-Lab.Passw0rd!}
+      LAB_SVC_PASSWORD: ${LAB_SVC_PASSWORD:-Svc.Passw0rd!}
+      LAB_SVC_ACCOUNT: svc-auth
+      LAB_GROUP_NAME: easyoidc-users
+      LAB_AUTH_HOSTNAME: auth
+      LAB_AUTH_IP: 172.28.10.20
+      LAB_KEYTAB_PATH: /lab/secrets/auth.keytab
+    volumes:
+      - samba-lib:/var/lib/samba
+      - samba-etc:/etc/samba
+      - ./dc:/lab/dc:ro
+      - ./secrets:/lab/secrets
+    networks:
+      lab:
+        ipv4_address: 172.28.10.10
+    healthcheck:
+      # Samba is up when its own DNS answers the Kerberos SRV record it registered.
+      test:
+        - CMD-SHELL
+        - >-
+          samba-tool processes >/dev/null 2>&1 &&
+          host -t SRV _kerberos._udp.lab.easyoidc.local 127.0.0.1 >/dev/null 2>&1
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  krb-client:
+    build:
+      context: ./client
+    image: auth-lab/krb-client:latest
+    container_name: auth-lab-client
+    hostname: krb-client
+    restart: unless-stopped
+    depends_on:
+      samba-dc:
+        condition: service_healthy
+    environment:
+      LAB_REALM: LAB.EASYOIDC.LOCAL
+      LAB_BASE_DN: DC=lab,DC=easyoidc,DC=local
+      LAB_DC_FQDN: dc1.lab.easyoidc.local
+      LAB_AUTH_FQDN: auth.lab.easyoidc.local
+      LAB_USER_PASSWORD: ${LAB_USER_PASSWORD:-Lab.Passw0rd!}
+      LAB_SVC_PASSWORD: ${LAB_SVC_PASSWORD:-Svc.Passw0rd!}
+      # ldapsearch must accept the DC's self-signed lab certificate.
+      LDAPTLS_REQCERT: never
+    volumes:
+      - ./krb5.conf:/etc/krb5.conf:ro
+      - ./secrets:/lab/secrets:ro
+    # The DC is the DNS server of the lab: SRV lookups for the KDC depend on it.
+    dns:
+      - 172.28.10.10
+    dns_search:
+      - lab.easyoidc.local
+    networks:
+      lab:
+        ipv4_address: 172.28.10.30
+    command: ["sleep", "infinity"]

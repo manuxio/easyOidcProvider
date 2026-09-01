@@ -1,0 +1,221 @@
+# Production-like stack for the auth-server (phase 5 of
+# the real production image, behind a real
+# nginx terminating TLS, with a real MongoDB — wired into the Active Directory
+# laboratory in lab/ so the Kerberos half is real too.
+#
+#   ./deploy/make-lab-cert.sh                                   # once
+#   docker compose -f docker-compose.prod-like.yml up -d --build
+#   docker compose -f docker-compose.prod-like.yml --profile test up -d
+#   ./deploy/test-prod-like.sh                                  # the acceptance run
+#   docker compose -f docker-compose.prod-like.yml --profile test down
+#
+# It is a SEPARATE compose project from the laboratory (`lab/docker-compose.yml`,
+# project `auth-lab`) and from the development server (`lab/dev-server-compose.yml`,
+# project `auth-lab-dev`, which owns 172.28.10.20). Bringing this stack up and
+# down never touches the domain controller or the development server.
+#
+# What is production-like and what is not
+# ---------------------------------------
+#   production-like  the image, the non-root user, TLS termination in nginx,
+#                    the issuer built from ISSUER_URL, MongoDB storage, the
+#                    keytab and krb5.conf mounted read-only, the DNS of the
+#                    domain, the SPN equal to the public FQDN
+#   laboratory only  the self-signed certificate, LDAP_TLS_INSECURE=true (Samba
+#                    signed its own LDAPS certificate), the passwords in the
+#                    clear below, and MongoDB without authentication on a
+#                    network no one else can reach
+
+name: auth-prod-like
+
+networks:
+  # The laboratory network, joined as external: the KDC (88) and LDAPS (636)
+  # live on it, and so does the test client. Created by lab/docker-compose.yml.
+  lab:
+    name: auth-lab
+    external: true
+
+  # nginx <-> auth-server <-> mongo. `internal: true` means no gateway and no
+  # route out: the database is reachable from the application and from nothing
+  # else, which is the point.
+  backend:
+    name: auth-prod-like-backend
+    driver: bridge
+    internal: true
+    ipam:
+      driver: default
+      config:
+        # Explicit, like every network in this project: Docker's default pool
+        # on this host overlaps the production PBX network 172.19.132.0/24.
+        - subnet: 172.28.20.0/24
+
+volumes:
+  # The OIDC state AND the RS256 signing key (src/secrets.ts prefers Mongo over
+  # DATA_DIR when both are available). This volume is what makes
+  # `down` + `up` keep the tokens already handed out valid.
+  mongo-data:
+
+services:
+  # ---------------------------------------------------------------------------
+  # nginx: terminates TLS on the public FQDN, forwards everything to the app.
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: auth-prod-like-nginx
+    restart: unless-stopped
+    depends_on:
+      auth-server:
+        condition: service_healthy
+    networks:
+      lab:
+        # NOT .20 — that address belongs to lab/dev-server-compose.yml.
+        ipv4_address: 172.28.10.40
+      backend:
+        ipv4_address: 172.28.20.10
+    volumes:
+      - ./deploy/nginx/auth-server.conf:/etc/nginx/conf.d/default.conf:ro
+      # Self-signed lab material from deploy/make-lab-cert.sh (gitignored).
+      - ./deploy/tls:/etc/nginx/tls:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nginx -t >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # The application, from the production image.
+  # ---------------------------------------------------------------------------
+  auth-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: easyoidc/auth-server:latest
+    container_name: auth-prod-like-auth-server
+    hostname: auth-server
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      # On the laboratory network because the KDC and the directory live there.
+      # In a real deployment this is "the container can reach the domain
+      # controllers on 88 and 636"; here it is the same thing, spelled out.
+      lab:
+        ipv4_address: 172.28.10.41
+      backend:
+        ipv4_address: 172.28.20.11
+    # The domain controller is the DNS server of the realm: the KDC is found
+    # through its SRV records, and dc1.lab.easyoidc.local through its zone.
+    # Docker keeps its own resolver at 127.0.0.11 and uses this as the upstream,
+    # so `mongo` and `auth-server` still resolve by service name.
+    dns:
+      - 172.28.10.10
+    dns_search:
+      - lab.easyoidc.local
+    volumes:
+      # Secrets and Kerberos configuration are MOUNTED, never in the image.
+      - ./lab/secrets/auth.keytab:/secrets/auth.keytab:ro
+      - ./lab/krb5.conf:/etc/krb5.conf:ro
+    environment:
+      # --- public identity -----------------------------------------------
+      # The single source of the public name: the issuer of the discovery
+      # document, the base of every published endpoint, and the root the
+      # Kerberos SPN is derived from. It is the name nginx serves, never the
+      # container's, and it is never rebuilt from request headers.
+      ISSUER_URL: https://auth.lab.easyoidc.local
+      PORT: "3000"
+      HOST: 0.0.0.0
+      # Behind a TLS-terminating proxy. This is what makes the session cookies
+      # Secure (oidc-provider reads koa's ctx.secure, which reads
+      # X-Forwarded-Proto) and what makes the access log show the real client.
+      TRUST_PROXY: "true"
+      LOG_LEVEL: ${AUTH_LOG_LEVEL:-info}
+
+      # --- storage --------------------------------------------------------
+      MONGO_URL: mongodb://mongo:27017
+      MONGO_DB_NAME: auth-server
+
+      # --- identity provider ----------------------------------------------
+      IDENTITY_PROVIDER: spnego
+      REALM: LAB.EASYOIDC.LOCAL
+
+      # --- Kerberos --------------------------------------------------------
+      # Read by the native krb5 library itself; the application re-exports it
+      # into its own environment at startup so the two cannot diverge.
+      KRB5_KTNAME: /secrets/auth.keytab
+      # Derived from ISSUER_URL anyway; spelled out because this is the line
+      # that has to match the keytab, and a silent mismatch is a 401 loop.
+      KERBEROS_SERVICE_NAME: HTTP/auth.lab.easyoidc.local
+
+      # --- directory -------------------------------------------------------
+      LDAP_URL: ldaps://dc1.lab.easyoidc.local
+      LDAP_BIND_DN: svc-auth@LAB.EASYOIDC.LOCAL
+      LDAP_BIND_PASSWORD: ${LAB_SVC_PASSWORD:-Svc.Passw0rd!}
+      LDAP_BASE_DN: DC=lab,DC=easyoidc,DC=local
+      LDAP_REQUIRED_GROUP: ${LAB_REQUIRED_GROUP:-}
+      LDAP_TIMEOUT_MS: "5000"
+      LDAP_CONNECT_TIMEOUT_MS: "5000"
+      # LABORATORY ONLY: Samba signed its own certificate while provisioning.
+      # Production sets LDAP_TLS_CA_FILE to the domain CA instead, and the
+      # server logs a warning at every startup while this switch is on.
+      LDAP_TLS_INSECURE: "true"
+
+      # --- optional SQL group check (phase 4), off ------------------------
+      SQL_GROUP_CHECK_ENABLED: "false"
+
+      # --- tokens ----------------------------------------------------------
+      ACCESS_TOKEN_TTL: "3600"
+      REFRESH_TOKEN_TTL: "43200"
+
+      # --- clients ----------------------------------------------------------
+      # One loopback redirect URI covers every port the desktop client may listen on
+      # (RFC 8252, which `application_type: native` unlocks).
+      CLIENTS_JSON: '[{"client_id":"desktop-app","redirect_uris":["http://127.0.0.1/callback"]}]'
+
+  # ---------------------------------------------------------------------------
+  # MongoDB: OIDC state and the signing key. Internal network only.
+  # ---------------------------------------------------------------------------
+  mongo:
+    image: mongo:8
+    container_name: auth-prod-like-mongo
+    restart: unless-stopped
+    command: ["--bind_ip_all", "--quiet"]
+    networks:
+      backend:
+        ipv4_address: 172.28.20.12
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' | grep -q 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Test box, behind the `test` profile so a plain `up` never starts it.
+  # Same image as the laboratory client; it is where kinit runs and where the
+  # acceptance script drives curl over HTTPS.
+  # ---------------------------------------------------------------------------
+  test-client:
+    profiles: ["test"]
+    build:
+      context: ./lab/client
+    image: auth-lab/krb-client:latest
+    container_name: auth-prod-like-client
+    hostname: prod-like-client
+    networks:
+      lab:
+        ipv4_address: 172.28.10.42
+    dns:
+      - 172.28.10.10
+    dns_search:
+      - lab.easyoidc.local
+    environment:
+      LDAPTLS_REQCERT: never
+    volumes:
+      - ./lab/krb5.conf:/etc/krb5.conf:ro
+      - ./lab/secrets:/lab/secrets:ro
+      # The lab CA, so curl can verify the certificate nginx serves instead of
+      # being told to skip the check.
+      - ./deploy/tls/ca.crt:/lab/ca.crt:ro
+    command: ["sleep", "infinity"]

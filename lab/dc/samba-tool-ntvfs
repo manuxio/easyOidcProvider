@@ -1,0 +1,48 @@
+#!/usr/bin/python3
+"""samba-tool wrapper that provisions without the smbd ACL backend.
+
+Why this exists
+---------------
+`samba-tool domain provision` writes the sysvol NT ACLs through the in-process
+smbd bindings (`samba.ntacls.setntacl` with `use_ntvfs=False`). That path ends in
+`chown_if_needed() -> sec_ctx_active_token()`, which panics with
+
+    INTERNAL ERROR: Security context active token stack underflow!
+
+under rootless Docker, where the process cannot chown files to the uid the
+Administrator SID maps to. The panic is reproducible on Samba 4.19 (Alpine) and
+4.22 (Debian) alike, so it is the environment, not the version.
+
+Samba already has the other backend: with `use_ntvfs=True` the NT ACLs are
+written straight into an extended-attribute store instead of going through smbd,
+and `useeadb=True` puts that store in a tdb (`private/eadb.tdb`) so no
+`security.*` filesystem xattr is needed either — those are refused inside a user
+namespace. Nothing else about the domain changes.
+
+The laboratory never serves sysvol or applies GPOs; it exists for the KDC, LDAP
+and DNS. Forcing both flags is therefore free here. It would NOT be an acceptable
+setting for a domain controller that actually serves files.
+
+`samba-tool` itself does `from samba.provision import provision`, so patching the
+attribute on the module before samba-tool is loaded is enough.
+
+Usage: exactly like samba-tool.
+"""
+import runpy
+import sys
+
+import samba.provision
+
+_original_provision = samba.provision.provision
+
+
+def _provision_without_smbd_acls(*args, **kwargs):
+    kwargs["use_ntvfs"] = True
+    kwargs["useeadb"] = True
+    return _original_provision(*args, **kwargs)
+
+
+samba.provision.provision = _provision_without_smbd_acls
+
+sys.argv = ["samba-tool"] + sys.argv[1:]
+runpy.run_path("/usr/bin/samba-tool", run_name="__main__")

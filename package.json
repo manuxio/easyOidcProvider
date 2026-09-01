@@ -1,0 +1,67 @@
+{
+  "name": "easy-oidc-provider",
+  "version": "1.0.0",
+  "description": "Batteries-included OAuth2/OIDC authorization server: Kerberos/AD silent SSO, LDAP or database credentials, optional TOTP 2FA, SQL-sourced token claims",
+  "license": "MIT",
+  "author": "Manuele Cappelleri (https://github.com/manuxio)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/manuxio/easyOidcProvider.git"
+  },
+  "bugs": {
+    "url": "https://github.com/manuxio/easyOidcProvider/issues"
+  },
+  "homepage": "https://github.com/manuxio/easyOidcProvider#readme",
+  "keywords": [
+    "oauth2",
+    "oidc",
+    "openid-connect",
+    "sso",
+    "kerberos",
+    "spnego",
+    "active-directory",
+    "ldap",
+    "authorization-server",
+    "totp",
+    "2fa",
+    "pkce"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.4.0",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "jose": "^6.2.10",
+    "kerberos": "^2.2.2",
+    "ldapts": "^8.2.0",
+    "mongodb": "^6.21.0",
+    "mssql": "^11.0.1",
+    "mysql2": "^3.24.2",
+    "oidc-provider": "^9.12.0",
+    "otplib": "^13.5.0",
+    "pino": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.5",
+    "@types/mssql": "^12.3.0",
+    "@types/node": "^22.15.0",
+    "@types/oidc-provider": "^9.4.0",
+    "openid-client": "^6.8.7",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

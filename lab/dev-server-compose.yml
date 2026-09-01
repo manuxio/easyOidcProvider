@@ -1,0 +1,106 @@
+# The auth-server, wired into the Active Directory laboratory (phase 3).
+#
+#   docker compose -f dev-server-compose.yml up -d --build
+#   docker compose -f dev-server-compose.yml logs -f
+#   docker compose -f dev-server-compose.yml down
+#
+# It is a SEPARATE compose project from the lab itself, so bringing the server
+# up and down never touches the domain controller. It joins the lab's existing
+# network as an external network and takes 172.28.10.20 — the address the DNS
+# record auth.lab.easyoidc.local already points at, which is the name inside
+# the Kerberos SPN.
+#
+# Start the lab first (./provision.sh); this file assumes the network, the DNS
+# record and secrets/auth.keytab are already there.
+
+name: auth-lab-dev
+
+networks:
+  lab:
+    name: auth-lab
+    external: true
+
+volumes:
+  # RS256 signing key and cookie keys. Keeping them in a volume means a restart
+  # of the container does not invalidate the tokens already handed out.
+  auth-data:
+
+services:
+  auth-server:
+    build:
+      context: ./dev-server
+    image: auth-lab/auth-server-dev:latest
+    container_name: auth-lab-auth-server
+    hostname: auth
+    restart: unless-stopped
+    networks:
+      lab:
+        ipv4_address: 172.28.10.20
+    # The DC is the DNS server of the lab; the KDC is found through its SRV records.
+    dns:
+      - 172.28.10.10
+    dns_search:
+      - lab.easyoidc.local
+    volumes:
+      # The application itself, straight from the working tree (node_modules
+      # included: the prebuilt kerberos binary from the host loads here, and
+      # this container's glibc is newer than the host's).
+      - ..:/app
+      # Service keytab holding HTTP/auth.lab.easyoidc.local@LAB.EASYOIDC.LOCAL.
+      - ./secrets/auth.keytab:/secrets/auth.keytab:ro
+      - ./krb5.conf:/etc/krb5.conf:ro
+      - auth-data:/var/lib/auth-server
+    environment:
+      # --- public identity ---
+      ISSUER_URL: http://auth.lab.easyoidc.local:3000
+      PORT: "3000"
+      HOST: 0.0.0.0
+      TRUST_PROXY: "false"
+      LOG_LEVEL: ${AUTH_LOG_LEVEL:-debug}
+
+      # --- storage: in-memory OIDC state, persisted signing key ---
+      MONGO_URL: ""
+      DATA_DIR: /var/lib/auth-server
+
+      # --- identity provider ---
+      IDENTITY_PROVIDER: spnego
+      REALM: LAB.EASYOIDC.LOCAL
+
+      # --- Kerberos ---
+      KRB5_KTNAME: /secrets/auth.keytab
+      # Derived from ISSUER_URL anyway; spelled out so the lab is explicit.
+      KERBEROS_SERVICE_NAME: HTTP/auth.lab.easyoidc.local
+
+      # --- LDAP ---
+      LDAP_URL: ldaps://dc1.lab.easyoidc.local
+      LDAP_BIND_DN: svc-auth@LAB.EASYOIDC.LOCAL
+      LDAP_BIND_PASSWORD: ${LAB_SVC_PASSWORD:-Svc.Passw0rd!}
+      LDAP_BASE_DN: DC=lab,DC=easyoidc,DC=local
+      # Off by default, exactly as in production. Set it to
+      # CN=easyoidc-users,CN=Users,DC=lab,DC=easyoidc,DC=local to watch
+      # luigi.verdi be refused for group membership instead of for being disabled.
+      LDAP_REQUIRED_GROUP: ${LAB_REQUIRED_GROUP:-}
+      LDAP_TIMEOUT_MS: "5000"
+      LDAP_CONNECT_TIMEOUT_MS: "5000"
+      # LABORATORY ONLY: Samba generated its own self-signed certificate at
+      # provision time. Production uses LDAP_TLS_CA_FILE with the domain CA.
+      LDAP_TLS_INSECURE: "true"
+
+      # --- tokens ---
+      ACCESS_TOKEN_TTL: "3600"
+      REFRESH_TOKEN_TTL: "43200"
+
+      # --- clients ---
+      CLIENTS_JSON: '[{"client_id":"desktop-app","redirect_uris":["http://127.0.0.1/callback"]}]'
+      # A developer's applications/auth-server/.env is bind-mounted along with
+      # the rest of the tree, but dotenv never overwrites an existing variable,
+      # so everything above still wins.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s

@@ -1,0 +1,16 @@
+node_modules/
+dist/
+data/
+*.log
+
+# Local environment files: real deployments configure through the environment.
+# .env.example is the only tracked template.
+.env
+.env.*
+!.env.example
+
+# Lab-generated secret material (the provision scripts recreate it).
+deploy/tls/*
+!deploy/tls/.gitkeep
+lab/secrets/*
+!lab/secrets/.gitkeep
