@@ -7,6 +7,12 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # The type definitions track the RUNTIME Node major (engines >= 22, the
+      # Docker image is node:22): a types major ahead of the runtime lets code
+      # reference APIs that do not exist in production.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
 
   - package-ecosystem: github-actions
     directory: /
