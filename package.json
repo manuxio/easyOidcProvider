@@ -45,7 +45,7 @@
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "jose": "^6.2.10",
-    "kerberos": "^2.2.2",
+    "kerberos": "^7.0.0",
     "ldapts": "^9.0.0",
     "mongodb": "^6.21.0",
     "mssql": "^11.0.1",
