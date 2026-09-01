@@ -1,0 +1,11 @@
+# Exported keytabs and any other credential material produced by provision.sh.
+secrets/
+
+# Local state, in case the lab is switched from named volumes to bind mounts.
+state/
+
+# Local compose overrides / password overrides.
+.env
+docker-compose.override.yml
+
+*.keytab
