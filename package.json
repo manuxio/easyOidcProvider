@@ -48,7 +48,7 @@
     "kerberos": "^2.2.2",
     "ldapts": "^9.0.0",
     "mongodb": "^6.21.0",
-    "mssql": "^11.0.1",
+    "mssql": "^12.7.0",
     "mysql2": "^3.24.2",
     "oidc-provider": "^9.12.0",
     "otplib": "^13.5.0",
