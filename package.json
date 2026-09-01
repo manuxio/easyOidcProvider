@@ -1,6 +1,6 @@
 {
   "name": "easy-oidc-provider",
-  "version": "0.2.0",
+  "version": "1.1.0",
   "description": "Batteries-included OAuth2/OIDC authorization server: Kerberos/AD silent SSO, LDAP or database credentials, optional TOTP 2FA, SQL-sourced token claims",
   "license": "MIT",
   "author": "Manuele Cappelleri (https://github.com/manuxio)",
