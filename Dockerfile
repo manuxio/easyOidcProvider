@@ -17,7 +17,7 @@
 # TypeScript compile, and then a prune back to production dependencies. Any
 # compiler, header file or npm cache dies with this stage.
 ##############################################################################
-FROM node:22-bookworm-slim AS build
+FROM node:26-bookworm-slim AS build
 
 WORKDIR /app
 
