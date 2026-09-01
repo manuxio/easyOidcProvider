@@ -47,7 +47,7 @@
     "jose": "^6.2.10",
     "kerberos": "^2.2.2",
     "ldapts": "^9.0.0",
-    "mongodb": "^6.21.0",
+    "mongodb": "^7.6.0",
     "mssql": "^11.0.1",
     "mysql2": "^3.24.2",
     "oidc-provider": "^9.12.0",
