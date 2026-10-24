@@ -67,6 +67,17 @@ export interface CreateAuthServerOptions {
   twoFactorSeedSource?: TwoFactorSeedSource;
   /** Phase 4-ter test seam: an extra-claims source in place of the SQL one. */
   extraClaimsSource?: ExtraClaimsSource;
+  /**
+   * Test seam: the oidc state store when MONGO_URL is unset, in place of
+   * oidc-provider's own in-memory adapter. Ignored when MONGO_URL is set.
+   */
+  adapterFactory?: AdapterFactory;
+  /**
+   * Test seam (1.3.0): an identity provider in place of the configured one —
+   * e.g. an SpnegoIdentityProvider over a fake directory, so a test can drive
+   * the AD group gates end to end without a domain controller.
+   */
+  identity?: IdentityProvider;
 }
 
 export async function createAuthServer(options: CreateAuthServerOptions): Promise<AuthServer> {
@@ -81,6 +92,7 @@ export async function createAuthServer(options: CreateAuthServerOptions): Promis
     adapterFactory = storage.adapterFactory;
     logger.info({ db: storage.db.databaseName }, 'oidc state stored in mongodb');
   } else {
+    adapterFactory = options.adapterFactory;
     logger.warn(
       { reason: 'no_mongo_url' },
       'MONGO_URL is not set: oidc state is kept in memory, a restart drops every session and token (development only)',
@@ -125,7 +137,7 @@ export async function createAuthServer(options: CreateAuthServerOptions): Promis
     ? buildCredentialStore(config, logger, sqlDriver)
     : undefined;
 
-  const identity = createIdentityProvider(
+  const identity = options.identity ?? createIdentityProvider(
     config,
     logger,
     credentialStore ? { credentialStore } : {},

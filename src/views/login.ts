@@ -42,6 +42,10 @@ const REASON_TEXT: Record<ChallengeReason, string> = {
     "L'accesso automatico al dominio non è riuscito. Inserire le credenziali di dominio nel modulo qui sotto.",
   sql_group_check_failed:
     "Le credenziali sono corrette, ma l'utenza non risulta abilitata all'uso di questa applicazione. Rivolgersi all'amministratore di sistema.",
+  // 1.3.0: per-client restriction. It names the application, not the platform
+  // as a whole, because the same account keeps working on the other clients.
+  client_group_not_allowed:
+    "Le credenziali sono corrette, ma l'utenza non appartiene a nessuno dei gruppi di dominio abilitati a questa applicazione. Le altre applicazioni restano utilizzabili. Rivolgersi all'amministratore di sistema.",
   // --- phase 4-bis ---------------------------------------------------------
   // Deliberately explicit: this message is only ever shown AFTER the password
   // was accepted, so it reveals nothing to somebody guessing user names, and it

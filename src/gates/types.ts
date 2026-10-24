@@ -11,7 +11,16 @@
  * the seam.
  */
 
-export type GateStage = 'login' | 'refresh';
+/**
+ * `token_exchange`: the gates run again before a person's token is traded for
+ * a delegated one (RFC 8693), exactly as before a refresh.
+ *
+ * `authorization` (1.3.0): the authorization endpoint hands a code to a client
+ * restricted by `required_ldap_groups` on a session opened by ANOTHER client
+ * (SSO reuse), so no login — and so no gate — ran for this client. See
+ * loadExistingGrant in src/provider/index.ts.
+ */
+export type GateStage = 'login' | 'refresh' | 'token_exchange' | 'authorization';
 
 export interface AccountGateContext {
   /** The AD principal, user@REALM. */
@@ -20,6 +29,13 @@ export interface AccountGateContext {
   username: string;
   stage: GateStage;
   clientId?: string;
+  /**
+   * `token_exchange` only: the client the person's subject token was issued
+   * to. `clientId` is then the exchanging service, which has no person of its
+   * own, while the authority being traded in is what the person obtained
+   * through THIS client — so its restrictions apply to the trade too.
+   */
+  subjectClientId?: string;
 }
 
 export type AccountGateResult =

@@ -49,9 +49,16 @@ export type CredentialCheck =
   | { ok: true; sAMAccountName?: string }
   | { ok: false; reason: LdapRejectionReason };
 
-/** Outcome of the liveness check. `reason` is a stable token for the logs. */
+/**
+ * Outcome of the liveness check. `reason` is a stable token for the logs.
+ *
+ * `memberOf` is the raw attribute exactly as the directory returned it (direct
+ * memberships only, no nested groups). It rides along so the per-client group
+ * gate can decide on the SAME read instead of opening a second LDAPS
+ * connection within the same login or refresh.
+ */
 export type AccountStatus =
-  | { active: true; dn: string }
+  | { active: true; dn: string; memberOf: string[] }
   | { active: false; reason: LdapRejectionReason };
 
 export type LdapRejectionReason =
@@ -129,8 +136,12 @@ export function accountExpired(raw: string | undefined, now: number = Date.now()
   return epochMs <= now;
 }
 
-/** Case-insensitive, whitespace-tolerant DN comparison. Good enough for memberOf. */
-function sameDn(a: string, b: string): boolean {
+/**
+ * Case-insensitive, whitespace-tolerant DN comparison. Good enough for memberOf.
+ * Exported for the per-client group gate, which must compare exactly the way
+ * LDAP_REQUIRED_GROUP is compared here.
+ */
+export function sameDn(a: string, b: string): boolean {
   const normalise = (dn: string): string =>
     dn
       .split(',')
@@ -459,8 +470,8 @@ export class LdapDirectory {
         );
       }
 
+      const groups = allValues(entry, 'memberOf');
       if (requiredGroup !== undefined) {
-        const groups = allValues(entry, 'memberOf');
         if (!groups.some((group) => sameDn(group, requiredGroup))) {
           this.#logger.warn(
             {
@@ -480,7 +491,7 @@ export class LdapDirectory {
         { username: sAMAccountName, dn, userAccountControl: uac, accountExpires: expiresRaw },
         'the directory reports the account as active',
       );
-      return { active: true, dn };
+      return { active: true, dn, memberOf: groups };
     });
   }
 }

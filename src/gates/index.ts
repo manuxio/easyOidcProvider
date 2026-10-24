@@ -1,10 +1,11 @@
 import type { Config } from '../config.js';
-import type { IdentityProvider } from '../identity/types.js';
+import type { IdentityAccountStatus, IdentityProvider } from '../identity/types.js';
 import type { Logger } from '../logger.js';
 // --- phase 4: optional SQL group check ---
 import { createSqlGroupChecker, type SqlDriver } from '../sqlcheck/index.js';
 import { sqlGroupGate } from './sqlGroup.js';
 // --- end phase 4 ---
+import { clientGroupGate } from './clientGroup.js';
 import type {
   AccountGate,
   AccountGateContext,
@@ -13,13 +14,47 @@ import type {
 
 export * from './types.js';
 export { sqlGroupGate, SQL_GROUP_CHECK_FAILED, SQL_GROUP_GATE_NAME } from './sqlGroup.js';
+export { clientGroupGate, CLIENT_GROUP_NOT_ALLOWED, CLIENT_GROUP_GATE_NAME } from './clientGroup.js';
+
+/**
+ * One `inspectAccount` per gate run (1.3.0).
+ *
+ * runAccountGates hands the SAME context object to every gate of one run, so
+ * keying on it shares the directory read between account_active and the
+ * per-client group gate, and forgets it with the run: the next login or
+ * refresh reads the directory afresh, which is the whole point of re-running
+ * the gates. A rejected lookup is memoised too, so a directory outage is one
+ * failed round trip, not one per gate.
+ *
+ * Undefined when the provider cannot name a reason (dev-stub, database): then
+ * account_active falls back to isAccountActive, and no gate needs memberOf —
+ * config.ts refuses required_ldap_groups for those providers.
+ */
+function memoisedInspector(
+  identity: IdentityProvider,
+): ((context: AccountGateContext) => Promise<IdentityAccountStatus>) | undefined {
+  if (!identity.inspectAccount) return undefined;
+  const runs = new WeakMap<AccountGateContext, Promise<IdentityAccountStatus>>();
+  return (context) => {
+    let pending = runs.get(context);
+    if (!pending) {
+      pending = identity.inspectAccount!(context.principal);
+      runs.set(context, pending);
+    }
+    return pending;
+  };
+}
 
 /**
  * Liveness of the account as the identity provider sees it.
  * dev-stub reads the `active` flag; phase 3 reads userAccountControl /
  * accountExpires over LDAP behind the same method.
  */
-export function accountActiveGate(identity: IdentityProvider): AccountGate {
+export function accountActiveGate(
+  identity: IdentityProvider,
+  /** 1.3.0: the shared lookup of buildAccountGates; absent = ask the provider directly. */
+  inspect?: (context: AccountGateContext) => Promise<IdentityAccountStatus>,
+): AccountGate {
   return {
     name: 'account_active',
     async check(context) {
@@ -28,7 +63,9 @@ export function accountActiveGate(identity: IdentityProvider): AccountGate {
       // accountExpires and LDAP_REQUIRED_GROUP) gets to say it, instead of
       // having every refusal flattened into `account_disabled`.
       if (identity.inspectAccount) {
-        const status = await identity.inspectAccount(context.principal);
+        const status = inspect
+          ? await inspect(context)
+          : await identity.inspectAccount(context.principal);
         return status.active
           ? { allowed: true }
           : { allowed: false, reason: status.reason };
@@ -55,7 +92,27 @@ export function buildAccountGates(
   logger: Logger,
   options: BuildAccountGatesOptions = {},
 ): AccountGate[] {
-  const gates: AccountGate[] = [accountActiveGate(identity)];
+  const inspect = memoisedInspector(identity);
+  const gates: AccountGate[] = [accountActiveGate(identity, inspect)];
+
+  // --- 1.3.0: per-client LDAP group restriction ---
+  // Right after liveness, before anything remote: it costs no round trip of
+  // its own (it reads the memberOf account_active just fetched). Registered
+  // only when some client declares groups; config.ts guarantees the provider
+  // can read them, so `inspect` exists whenever this runs.
+  if (config.clientRequiredGroups.size > 0) {
+    if (!inspect) {
+      throw new Error(
+        `required_ldap_groups is set but the ${identity.name} identity provider cannot read AD groups: the configuration was not validated`,
+      );
+    }
+    gates.push(clientGroupGate(config.clientRequiredGroups, inspect, logger));
+    logger.info(
+      { clientRequiredGroups: Object.fromEntries(config.clientRequiredGroups) },
+      'per-client LDAP group restriction enabled: checked at login, at SSO reuse, at every refresh and at every token exchange',
+    );
+  }
+  // --- end 1.3.0 ---
 
   // --- phase 4: optional SQL group check ---
   // The switch is the whole contract: with it off nothing here is constructed,

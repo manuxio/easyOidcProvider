@@ -14,7 +14,10 @@ import { createSilentLogger } from '../../src/logger.js';
 import { createCapturingLogger } from '../helpers/captureLogger.js';
 import { FakeSeedSource } from '../helpers/fakeSeedSource.js';
 import {
+  TWO_FACTOR_DIGITS,
   TWO_FACTOR_REASONS,
+  TWO_FACTOR_STEP_SECONDS,
+  TWO_FACTOR_WINDOW_STEPS,
   TwoFactorSeedUnavailable,
   TwoFactorVerifier,
 } from '../../src/twofactor/index.js';
@@ -240,5 +243,163 @@ describe('the seed source', () => {
     const { verifier, source } = harness();
     await verifier.close();
     expect(source.closed).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The fixed parameters, the window edges and the replay table's bookkeeping
+// (verifier.ts header: 6 digits, 30 s, ±1 step, in-memory and bounded).
+// ---------------------------------------------------------------------------
+
+describe('the fixed RFC 6238 parameters', () => {
+  it('are 6 digits, 30-second steps and one step of tolerance', () => {
+    expect(TWO_FACTOR_DIGITS).toBe(6);
+    expect(TWO_FACTOR_STEP_SECONDS).toBe(30);
+    expect(TWO_FACTOR_WINDOW_STEPS).toBe(1);
+  });
+
+  it('refuses the code two steps behind and two steps ahead', async () => {
+    const { verifier } = harness();
+    await expect(verifier.verify(USER, codeAt(NOW_SECONDS - 60))).resolves.toEqual({
+      status: 'failed',
+      reason: TWO_FACTOR_REASONS.failed,
+    });
+    await expect(verifier.verify(USER, codeAt(NOW_SECONDS + 60))).resolves.toEqual({
+      status: 'failed',
+      reason: TWO_FACTOR_REASONS.failed,
+    });
+  });
+
+  it('returns the time step of the accepted code', async () => {
+    const { verifier } = harness();
+    const currentStep = Math.floor(NOW_SECONDS / TWO_FACTOR_STEP_SECONDS);
+    await expect(verifier.verify(USER, codeAt(NOW_SECONDS - 30))).resolves.toEqual({
+      status: 'ok',
+      timeStep: currentStep - 1,
+    });
+    expect(verifier.lastAcceptedStep(USER)).toBe(currentStep - 1);
+  });
+
+  it('tolerates a dash between the digit groups too', async () => {
+    const { verifier } = harness();
+    const code = codeAt(NOW_SECONDS);
+    await expect(verifier.verify(USER, `${code.slice(0, 3)}-${code.slice(3)}`))
+      .resolves.toMatchObject({ status: 'ok' });
+  });
+
+  it('treats a code of blanks only as no code at all', async () => {
+    const { verifier, source } = harness();
+    await expect(verifier.verify(USER, '  - ')).resolves.toEqual({
+      status: 'failed',
+      reason: TWO_FACTOR_REASONS.missingCode,
+    });
+    expect(source.lookups).toEqual([]);
+  });
+
+  it('asks the source exactly once per well-formed code, for that user', async () => {
+    const { verifier, source } = harness();
+    await verifier.verify(USER, codeAt(NOW_SECONDS, OTHER_SEED));
+    expect(source.lookups).toEqual([USER]);
+  });
+
+  it('trims the blanks around a stored seed', async () => {
+    const { verifier } = harness({ [USER]: `  ${SEED}\n` });
+    await expect(verifier.verify(USER, codeAt(NOW_SECONDS))).resolves.toMatchObject({ status: 'ok' });
+  });
+});
+
+describe('failures of the source, whatever they throw', () => {
+  it('reports a plain Error from the source as unavailable as well', async () => {
+    const capture = createCapturingLogger();
+    const source = new FakeSeedSource({ [USER]: SEED });
+    source.failWith = new Error('ETIMEDOUT');
+    const verifier = new TwoFactorVerifier({ source, logger: capture.logger, now: () => NOW_SECONDS * 1000 });
+
+    await expect(verifier.verify(USER, codeAt(NOW_SECONDS))).resolves.toEqual({
+      status: 'unavailable',
+      reason: TWO_FACTOR_REASONS.unavailable,
+    });
+    const [line] = capture.withReason(TWO_FACTOR_REASONS.unavailable);
+    expect(line).toMatchObject({ level: 'error', err: { name: 'TwoFactorSeedUnavailable', message: 'ETIMEDOUT' } });
+  });
+});
+
+describe('what the verifier logs', () => {
+  it('logs an accepted code at info with its time step, and never the code or the seed', async () => {
+    const capture = createCapturingLogger();
+    const source = new FakeSeedSource({ [USER]: SEED });
+    const verifier = new TwoFactorVerifier({ source, logger: capture.logger, now: () => NOW_SECONDS * 1000 });
+    const code = codeAt(NOW_SECONDS);
+
+    await verifier.verify(USER, code);
+    const [line] = capture.matching('second factor accepted');
+    expect(line).toMatchObject({ level: 'info', username: USER, source: 'fake', component: 'two-factor' });
+    expect(typeof line!.timeStep).toBe('number');
+    // Quoted: the bare digits could legitimately occur inside the numeric timeStep.
+    expect(capture.text()).not.toContain(`"${code}"`);
+    expect(capture.text()).not.toContain(SEED);
+  });
+
+  it('logs a replay with the step it collided with', async () => {
+    const capture = createCapturingLogger();
+    const source = new FakeSeedSource({ [USER]: SEED });
+    const verifier = new TwoFactorVerifier({ source, logger: capture.logger, now: () => NOW_SECONDS * 1000 });
+    const code = codeAt(NOW_SECONDS);
+
+    await verifier.verify(USER, code);
+    await verifier.verify(USER, code);
+    const [line] = capture.withReason(TWO_FACTOR_REASONS.replayed);
+    expect(line).toMatchObject({ level: 'warn' });
+    expect(line!.timeStep).toBe(line!.lastAcceptedStep);
+  });
+
+  it('exposes the name of its source', () => {
+    expect(harness().verifier.sourceName).toBe('fake');
+  });
+});
+
+describe('the replay table is bounded and in memory', () => {
+  it('evicts the least recently seen user past the ceiling, and says so', async () => {
+    const capture = createCapturingLogger();
+    const users = ['user-a', 'user-b', 'user-c'];
+    const source = new FakeSeedSource(Object.fromEntries(users.map((user) => [user, SEED])));
+    let nowMs = NOW_SECONDS * 1000;
+    const verifier = new TwoFactorVerifier({
+      source,
+      logger: capture.logger,
+      now: () => nowMs,
+      maxTrackedUsers: 2,
+    });
+    const code = codeAt(NOW_SECONDS);
+
+    for (const user of users) {
+      await expect(verifier.verify(user, code)).resolves.toMatchObject({ status: 'ok' });
+      // Still the same step: only `seenAt` moves.
+      nowMs += 1000;
+    }
+
+    expect(verifier.lastAcceptedStep('user-a')).toBeUndefined();
+    expect(verifier.lastAcceptedStep('user-b')).toBeDefined();
+    expect(verifier.lastAcceptedStep('user-c')).toBeDefined();
+    const [line] = capture.matching('replay table hit its ceiling');
+    expect(line).toMatchObject({ level: 'warn', evicted: 1, tracked: 2 });
+
+    // The cost of an eviction is the replay protection of that one user for
+    // the current step, never their access.
+    await expect(verifier.verify('user-a', code)).resolves.toMatchObject({ status: 'ok' });
+  });
+
+  it('forgets every accepted step on close', async () => {
+    const { verifier } = harness();
+    await verifier.verify(USER, codeAt(NOW_SECONDS));
+    expect(verifier.lastAcceptedStep(USER)).toBeDefined();
+    await verifier.close();
+    expect(verifier.lastAcceptedStep(USER)).toBeUndefined();
+  });
+
+  it('does not remember a refused code', async () => {
+    const { verifier } = harness();
+    await verifier.verify(USER, codeAt(NOW_SECONDS, OTHER_SEED));
+    expect(verifier.lastAcceptedStep(USER)).toBeUndefined();
   });
 });

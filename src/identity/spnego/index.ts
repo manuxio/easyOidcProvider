@@ -285,7 +285,11 @@ export class SpnegoIdentityProvider implements IdentityProvider {
   async inspectAccount(principal: string): Promise<IdentityAccountStatus> {
     const username = usernameFromPrincipal(principal);
     const status = await this.#directory.inspectAccount(username);
-    return status.active ? { active: true } : { active: false, reason: status.reason };
+    // memberOf travels with the verdict: the per-client group gate reads it
+    // from this same lookup instead of asking the directory a second time.
+    return status.active
+      ? { active: true, memberOf: status.memberOf }
+      : { active: false, reason: status.reason };
   }
 
   async isAccountActive(principal: string): Promise<boolean> {

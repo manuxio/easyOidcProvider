@@ -8,10 +8,12 @@
 import { createServer, type Server } from 'node:http';
 import { createServer as createProbe } from 'node:net';
 import type { AddressInfo } from 'node:net';
+import type { AdapterFactory } from 'oidc-provider';
 
 import { createAuthServer, type AuthServer } from '../../src/app.js';
-import { loadConfig } from '../../src/config.js';
+import { loadConfig, type Config } from '../../src/config.js';
 import type { DevStubIdentityProvider } from '../../src/identity/devStub.js';
+import type { IdentityProvider } from '../../src/identity/types.js';
 import { createSilentLogger, type Logger } from '../../src/logger.js';
 import type { ExtraClaimsSource } from '../../src/claims/index.js';
 import type { SqlDriver } from '../../src/sqlcheck/index.js';
@@ -48,6 +50,14 @@ export interface TestServerOptions {
    * the provider when the env also sets CLAIMS_SQL_ENABLED=true.
    */
   extraClaimsSource?: ExtraClaimsSource;
+  /** An oidc state store in place of oidc-provider's in-memory one (see test/helpers/memoryAdapter.ts). */
+  adapterFactory?: AdapterFactory;
+  /**
+   * 1.3.0: builds the identity provider from the loaded config, in place of
+   * the configured one (e.g. spnego over a fake directory). `stub` is then
+   * whatever this returns, not a dev-stub.
+   */
+  identity?: (config: Config, logger: Logger) => IdentityProvider;
 }
 
 export interface TestServer {
@@ -95,12 +105,15 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
     ...options.env,
   });
 
+  const logger = options.logger ?? createSilentLogger();
   const auth = await createAuthServer({
     config,
-    logger: options.logger ?? createSilentLogger(),
+    logger,
+    ...(options.identity ? { identity: options.identity(config, logger) } : {}),
     ...(options.sqlDriver ? { sqlDriver: options.sqlDriver } : {}),
     ...(options.twoFactorSeedSource ? { twoFactorSeedSource: options.twoFactorSeedSource } : {}),
     ...(options.extraClaimsSource ? { extraClaimsSource: options.extraClaimsSource } : {}),
+    ...(options.adapterFactory ? { adapterFactory: options.adapterFactory } : {}),
   });
   const http: Server = createServer(auth.app);
   await new Promise<void>((resolve) => http.listen(port, '127.0.0.1', resolve));

@@ -368,7 +368,10 @@ describe('redirect URIs (RFC 8252)', () => {
 
 describe('JWT access tokens for the resource API', () => {
   it('carries sub, realm and preferred_username when API_AUDIENCE is configured', async () => {
-    const s = await server([MARIO], { API_AUDIENCE: 'https://easyoidc.test/api' });
+    const s = await server([MARIO], {
+      API_AUDIENCE: 'https://easyoidc.test/api',
+      DEFAULT_RESOURCE_JSON: '{"scope":"api","grants":["client_credentials"]}',
+    });
     const config = await discover(s);
     const tokens = await exchange(config, await login(s, config, MARIO));
 

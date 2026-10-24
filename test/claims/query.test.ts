@@ -104,6 +104,15 @@ describe('the reserved-name blacklist stops the server at startup', () => {
     });
   }
 
+  it('a CLAIMS_SQL_QUERY column named act (or may_act) is refused at startup', () => {
+    // RFC 8693 delegation claims: only the token-exchange grant writes them.
+    expect(RESERVED_CLAIM_NAMES).toEqual(expect.arrayContaining(['act', 'may_act']));
+    expect(() => build('SELECT ID AS remoteId, nome AS act FROM users WHERE userid = ?'))
+      .toThrow(/produces the claim "act", which is reserved/);
+    expect(() => build('SELECT ID AS may_act FROM users WHERE userid = ?'))
+      .toThrow(/produces the claim "may_act", which is reserved/);
+  });
+
   it('refuses it whatever the case, so the catalogue stays readable', () => {
     expect(() => build('SELECT ID AS SUB FROM users WHERE userid = ?'))
       .toThrow(/reserved/);

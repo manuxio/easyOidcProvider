@@ -111,3 +111,81 @@ describe('the per-username cool-down', () => {
     expect(instance.check(USER).locked).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The edges of the window and of the cool-down (rateLimit.ts header: a brake
+// on guessing, in memory, never a lockout policy).
+// ---------------------------------------------------------------------------
+
+describe('the edges of the window and of the cool-down', () => {
+  it('reports the failures counted so far while still under the limit', () => {
+    const { instance } = limiter({ max: 3 });
+    instance.recordFailure(USER);
+    instance.recordFailure(USER);
+    expect(instance.check(USER)).toEqual({ locked: false, retryAfterSeconds: 0, failures: 2 });
+  });
+
+  it('rounds the seconds left in the cool-down up, never down to zero while locked', () => {
+    const { instance, advance } = limiter({ max: 1 });
+    instance.recordFailure(USER);
+    advance(LOCKOUT_MS - 500);
+    expect(instance.check(USER)).toEqual({ locked: true, retryAfterSeconds: 1, failures: 1 });
+  });
+
+  it('starts counting from one again once a cool-down has elapsed', () => {
+    const { instance, advance } = limiter({ max: 2 });
+    instance.recordFailure(USER);
+    instance.recordFailure(USER);
+    advance(LOCKOUT_MS);
+
+    // The first failure after the cool-down is a first failure, not a third.
+    expect(instance.recordFailure(USER)).toEqual({ locked: false, retryAfterSeconds: 0, failures: 1 });
+  });
+
+  it('keeps counting failures that stay inside the window', () => {
+    const { instance, advance } = limiter({ max: 3 });
+    instance.recordFailure(USER);
+    advance(LOCKOUT_MS - 1);
+    instance.recordFailure(USER);
+    advance(LOCKOUT_MS - 1);
+    // Each failure moves the window: three in a row, each one inside it.
+    expect(instance.recordFailure(USER).locked).toBe(true);
+  });
+
+  it('records an ordinary failure at debug, with the budget and the caller context', () => {
+    const capture = createCapturingLogger();
+    const { instance } = limiter({ max: 3, logger: capture.logger });
+    instance.recordFailure(' Mario.Rossi ', { stage: 'credentials', clientId: 'client-x' });
+    const [line] = capture.matching('failed form attempt recorded');
+    expect(line).toMatchObject({
+      level: 'debug',
+      component: 'login-rate-limit',
+      username: USER,
+      failures: 1,
+      allowed: 3,
+      stage: 'credentials',
+      clientId: 'client-x',
+    });
+  });
+
+  it('states the cool-down length in seconds when it trips', () => {
+    const capture = createCapturingLogger();
+    const { instance } = limiter({ max: 1, logger: capture.logger });
+    instance.recordFailure(USER);
+    expect(capture.withReason('login_rate_limited')[0]).toMatchObject({ failures: 1, lockoutSeconds: 300 });
+  });
+
+  it('when disabled, records nothing and reset is harmless', () => {
+    const { instance } = limiter({ max: 0 });
+    expect(instance.recordFailure(USER)).toEqual({ locked: false, retryAfterSeconds: 0, failures: 0 });
+    expect(instance.failures(USER)).toBe(0);
+    expect(() => instance.reset(USER)).not.toThrow();
+  });
+
+  it('resets a user whatever the case and blanks of the name', () => {
+    const { instance } = limiter({ max: 3 });
+    instance.recordFailure(USER);
+    instance.reset('  MARIO.ROSSI ');
+    expect(instance.failures(USER)).toBe(0);
+  });
+});

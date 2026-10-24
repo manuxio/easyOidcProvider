@@ -94,7 +94,7 @@ export class MongoAdapter implements Adapter {
   }
 }
 
-/** Every model oidc-provider may ask for; used to create indexes up front. */
+/** Every model the adapter may be asked for; used to create indexes up front. */
 const MODELS = [
   'Grant',
   'Session',
@@ -111,6 +111,9 @@ const MODELS = [
   'BackchannelAuthenticationRequest',
   'PushedAuthorizationRequest',
   'PreAuthorizedCode',
+  // Ours, not oidc-provider's: the RFC 8693 subject token registry
+  // (src/provider/subjectTokens.ts), written through the same adapter.
+  'SubjectTokenRecord',
 ] as const;
 
 export async function ensureMongoIndexes(db: Db): Promise<void> {

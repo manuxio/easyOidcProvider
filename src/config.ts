@@ -21,8 +21,120 @@ export type DatabaseAuthSourceName = 'sql' | 'mongo';
 /** A client registration as accepted in CLIENTS_JSON (oidc-provider metadata). */
 export interface ClientConfig {
   client_id: string;
-  redirect_uris: string[];
+  /** Required for the user clients; absent or empty for a machine-to-machine client. */
+  redirect_uris?: string[];
   [metadata: string]: unknown;
+}
+
+/**
+ * Scope names that belong to OpenID Connect itself. They never select a
+ * resource: a person reaches the API_AUDIENCE resource through `openid`.
+ */
+export const OIDC_SCOPES: readonly string[] = ['openid', 'offline_access', 'profile'];
+
+/** The OAuth 2.0 Token Exchange grant (RFC 8693 §2.1). */
+export const TOKEN_EXCHANGE_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:token-exchange';
+
+/** RFC 8693 §3 token type of an access token: the only one exchanged, the only one issued. */
+export const ACCESS_TOKEN_TYPE = 'urn:ietf:params:oauth:token-type:access_token';
+
+/**
+ * The three kinds of caller a resource can be opened to: `client_credentials`
+ * = machines, `authorization_code` = people (and the refresh_token grant that
+ * follows a login), `token-exchange` = a token delegated by a person to a
+ * service through RFC 8693.
+ */
+export const RESOURCE_GRANTS = ['client_credentials', 'authorization_code', 'token-exchange'] as const;
+export type ResourceGrant = (typeof RESOURCE_GRANTS)[number];
+
+/**
+ * The grants a subject token may have been born from. A person is behind
+ * both; a client_credentials token has no person and a token-exchange token
+ * is already delegated, so neither is ever exchangeable.
+ */
+export const SUBJECT_GRANTS = ['authorization_code', 'refresh_token'] as const;
+export type SubjectGrant = (typeof SUBJECT_GRANTS)[number];
+
+/**
+ * Token-endpoint authentication methods accepted for a token exchange client:
+ * the private key stays with the client, this server only knows the public one.
+ */
+export const EXCHANGE_AUTH_METHODS: readonly string[] = ['private_key_jwt'];
+
+/** Ceiling on the life of an exchanged token: a limit, never a default. */
+export const MAX_EXCHANGE_TTL_SECONDS = 900;
+
+/** A resource as its selecting scope and the grants allowed to ask for it. */
+export interface ResourceScopeConfig {
+  scope: string;
+  grants: ResourceGrant[];
+  /**
+   * Present exactly when `grants` lists `token-exchange`: the scopes an
+   * exchanged token may carry besides the selecting one.
+   */
+  exchange_scopes?: string[];
+}
+
+/**
+ * One RFC 8693 exchange a client may ask for, from CLIENTS_JSON[i].token_exchange.
+ * A request is served only when it matches exactly one rule.
+ */
+export interface TokenExchangeRule {
+  subject: {
+    token_type: typeof ACCESS_TOKEN_TYPE;
+    /** The audience the subject token must carry. */
+    audience: string;
+    /** The clients that may have obtained the subject token. */
+    client_ids: string[];
+    /** Every word of the subject token's grant type must be in this list. */
+    issued_by_grants: SubjectGrant[];
+  };
+  issue: {
+    token_type: typeof ACCESS_TOKEN_TYPE;
+    /** A declared resource audience that lists `token-exchange`. */
+    audience: string;
+    /** Space-separated: the most the issued token may carry, selector included. */
+    scope: string;
+    ttl_seconds: number;
+    refresh_token: false;
+  };
+  /** `CLIENTS_JSON[i].token_exchange[j]`, for the logs. */
+  where: string;
+}
+
+/**
+ * The API_AUDIENCE resource, declared in DEFAULT_RESOURCE_JSON. Its audience
+ * is API_AUDIENCE; `scope` selects it explicitly, `grants` says who may ask
+ * for it with that scope. A person always reaches it through `openid` too:
+ * that is plain OIDC, not a reservation.
+ */
+export type DefaultResourceConfig = ResourceScopeConfig;
+
+/**
+ * One more resource server, declared in RESOURCE_SERVERS_JSON: a token asked
+ * for with `scope` gets `aud` = `audience`.
+ */
+export interface ResourceServerConfig extends ResourceScopeConfig {
+  audience: string;
+}
+
+/** A scope token as RFC 6749 allows it, narrowed to what reads well in a config file. */
+const RESOURCE_SCOPE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+/** Token-endpoint authentication methods accepted for a machine-to-machine client. */
+export const MACHINE_AUTH_METHODS: readonly string[] = ['client_secret_basic', 'client_secret_post'];
+
+/** Shortest client_secret accepted: `openssl rand -hex 32` gives 64 characters. */
+export const MACHINE_SECRET_MIN_LENGTH = 32;
+
+/** A CLIENTS_JSON entry is machine-to-machine when it asks for client_credentials. */
+export function isMachineClient(client: { grant_types?: unknown }): boolean {
+  return Array.isArray(client.grant_types) && client.grant_types.includes('client_credentials');
+}
+
+/** A CLIENTS_JSON entry is a token exchange client when it asks for the RFC 8693 grant. */
+export function isExchangeClient(client: { grant_types?: unknown }): boolean {
+  return Array.isArray(client.grant_types) && client.grant_types.includes(TOKEN_EXCHANGE_GRANT_TYPE);
 }
 
 export interface DevStubUser {
@@ -187,6 +299,23 @@ export interface Config {
 
   clients: ClientConfig[];
 
+  /**
+   * client_id → its RFC 8693 rules, for every token exchange client. The
+   * rules are kept here because oidc-provider strips unknown client metadata:
+   * the entries in `clients` carry no `token_exchange`.
+   */
+  tokenExchange: ReadonlyMap<string, TokenExchangeRule[]>;
+
+  /**
+   * client_id → the AD groups a person must be a direct member of (any one of
+   * them) to obtain tokens for that user client: its `required_ldap_groups`.
+   * Kept here for the same reason as `tokenExchange`: oidc-provider strips
+   * unknown client metadata, so the entries in `clients` carry no such field.
+   * A client absent from the map has no per-client restriction; the global
+   * LDAP_REQUIRED_GROUP applies to every client regardless.
+   */
+  clientRequiredGroups: ReadonlyMap<string, readonly string[]>;
+
   accessTokenTtl: number;
   refreshTokenTtl: number;
 
@@ -195,6 +324,18 @@ export interface Config {
    * Unset => opaque access tokens, which is the oidc-provider default.
    */
   apiAudience?: string;
+
+  /**
+   * Additional resource servers from RESOURCE_SERVERS_JSON, each selected by
+   * its scope. Empty => the API_AUDIENCE is the only resource, as before.
+   */
+  resourceServers: ResourceServerConfig[];
+
+  /**
+   * DEFAULT_RESOURCE_JSON: set exactly when apiAudience is (the validator
+   * refuses one without the other).
+   */
+  defaultResource?: DefaultResourceConfig;
 
   kerberos: KerberosConfig;
   ldap: LdapConfig;
@@ -305,18 +446,642 @@ function parseJson(env: Env, name: string, problems: string[]): unknown {
   }
 }
 
-function parseClients(env: Env, problems: string[]): ClientConfig[] {
+/**
+ * A machine-to-machine client: confidential, client_credentials only, no
+ * redirect. Every field oidc-provider would otherwise fill from clientDefaults
+ * (which describe the public desktop client client) must be stated explicitly, so a
+ * missing line is a startup error and never a silently different client.
+ * Returns false when the entry has to be dropped.
+ */
+function validateMachineClient(
+  candidate: Record<string, unknown>,
+  where: string,
+  apiAudience: string | undefined,
+  resourceScopes: readonly ResourceScopeConfig[],
+  problems: string[],
+): boolean {
+  const before = problems.length;
+
+  if (apiAudience === undefined) {
+    problems.push(
+      `${where} uses grant_types client_credentials, which requires API_AUDIENCE `
+      + '(without an audience the token would be usable by no API)',
+    );
+  }
+
+  const grantTypes = candidate.grant_types as unknown[];
+  if (grantTypes.length !== 1) {
+    problems.push(
+      `${where}.grant_types must be exactly ["client_credentials"] for a machine-to-machine client`,
+    );
+  }
+
+  const method = candidate.token_endpoint_auth_method;
+  if (typeof method !== 'string' || !MACHINE_AUTH_METHODS.includes(method)) {
+    problems.push(
+      `${where}.token_endpoint_auth_method must be one of ${MACHINE_AUTH_METHODS.join(', ')} `
+      + `for a machine-to-machine client, got ${JSON.stringify(method)}`,
+    );
+  }
+
+  const secret = candidate.client_secret;
+  if (typeof secret !== 'string' || secret.trim() === '') {
+    problems.push(`${where}.client_secret is required for a machine-to-machine client`);
+  } else if (secret.length < MACHINE_SECRET_MIN_LENGTH) {
+    problems.push(
+      `${where}.client_secret must be at least ${MACHINE_SECRET_MIN_LENGTH} characters `
+      + '(generate one with: openssl rand -hex 32)',
+    );
+  }
+
+  const responseTypes = candidate.response_types;
+  if (!Array.isArray(responseTypes) || responseTypes.length !== 0) {
+    problems.push(`${where}.response_types must be [] for a machine-to-machine client`);
+  }
+
+  const redirectUris = candidate.redirect_uris;
+  if (redirectUris !== undefined && !(Array.isArray(redirectUris) && redirectUris.length === 0)) {
+    problems.push(`${where}.redirect_uris must be absent or [] for a machine-to-machine client`);
+  }
+
+  // Every configured resource scope open to client_credentials. Several may
+  // be listed: the client asks for one per request.
+  const allowed = resourceScopes
+    .filter((resource) => resource.grants.includes('client_credentials'))
+    .map((resource) => resource.scope);
+  const scope = candidate.scope;
+  const tokens = typeof scope === 'string' ? scope.split(' ') : [];
+  // Without API_AUDIENCE there are no resources at all: already reported above.
+  if (
+    apiAudience !== undefined
+    && (
+      tokens.length === 0
+      || tokens.some((token) => !allowed.includes(token))
+      || new Set(tokens).size !== tokens.length
+    )
+  ) {
+    const choices = allowed.length > 0
+      ? allowed.map((a) => JSON.stringify(a)).join(', ')
+      : '(none: no configured resource is open to client_credentials)';
+    problems.push(
+      `${where}.scope must list one or more of ${choices} `
+      + `(space-separated, no repeats) for a machine-to-machine client, got ${JSON.stringify(scope)}`,
+    );
+  }
+
+  return problems.length === before;
+}
+
+/** A declared resource as the token exchange rules see it: found by its audience. */
+interface AudienceResource extends ResourceScopeConfig {
+  audience: string;
+}
+
+/** JWK members that only a private (or symmetric) key carries. */
+const PRIVATE_JWK_MEMBERS: readonly string[] = ['d', 'p', 'q', 'dp', 'dq', 'qi', 'k'];
+
+/** Key types accepted in the jwks of a token exchange client: asymmetric only. */
+const PUBLIC_JWK_TYPES: readonly string[] = ['RSA', 'EC', 'OKP'];
+
+/** Fields of a token exchange rule and of its two halves. */
+const RULE_FIELDS: readonly string[] = ['subject', 'issue'];
+const SUBJECT_FIELDS: readonly string[] = ['token_type', 'audience', 'client_ids', 'issued_by_grants'];
+const ISSUE_FIELDS: readonly string[] = ['token_type', 'audience', 'scope', 'ttl_seconds', 'refresh_token'];
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * One rule of CLIENTS_JSON[i].token_exchange. Every field is required and
+ * checked against the declared resources and clients; returns undefined when
+ * the rule has to be dropped.
+ */
+function parseTokenExchangeRule(
+  entry: unknown,
+  where: string,
+  resources: readonly AudienceResource[],
+  clientIds: ReadonlySet<string>,
+  problems: string[],
+): TokenExchangeRule | undefined {
+  if (!isPlainObject(entry)) {
+    problems.push(`${where} must be an object {"subject","issue"}`);
+    return undefined;
+  }
+  const before = problems.length;
+
+  const unknown = Object.keys(entry).filter((key) => !RULE_FIELDS.includes(key));
+  if (unknown.length > 0) {
+    problems.push(`${where} has unknown fields: ${unknown.join(', ')} (only subject and issue)`);
+  }
+  const subject = entry.subject;
+  const issue = entry.issue;
+  if (!isPlainObject(subject)) {
+    problems.push(`${where}.subject is required: {${SUBJECT_FIELDS.map((f) => JSON.stringify(f)).join(',')}}`);
+  }
+  if (!isPlainObject(issue)) {
+    problems.push(`${where}.issue is required: {${ISSUE_FIELDS.map((f) => JSON.stringify(f)).join(',')}}`);
+  }
+  if (!isPlainObject(subject) || !isPlainObject(issue)) return undefined;
+
+  const unknownSubject = Object.keys(subject).filter((key) => !SUBJECT_FIELDS.includes(key));
+  if (unknownSubject.length > 0) {
+    problems.push(
+      `${where}.subject has unknown fields: ${unknownSubject.join(', ')} (only ${SUBJECT_FIELDS.join(', ')})`,
+    );
+  }
+  const unknownIssue = Object.keys(issue).filter((key) => !ISSUE_FIELDS.includes(key));
+  if (unknownIssue.length > 0) {
+    problems.push(
+      `${where}.issue has unknown fields: ${unknownIssue.join(', ')} (only ${ISSUE_FIELDS.join(', ')})`,
+    );
+  }
+
+  // --- subject: the token that comes in ---------------------------------------
+  if (subject.token_type !== ACCESS_TOKEN_TYPE) {
+    problems.push(
+      `${where}.subject.token_type must be "${ACCESS_TOKEN_TYPE}" (the only subject token type accepted)`,
+    );
+  }
+
+  const subjectAudience = subject.audience;
+  const subjectResource = resources.find((resource) => resource.audience === subjectAudience);
+  if (subjectResource === undefined) {
+    problems.push(
+      `${where}.subject.audience ${JSON.stringify(subjectAudience)} is not a declared resource audience `
+      + '(API_AUDIENCE or RESOURCE_SERVERS_JSON)',
+    );
+  }
+
+  const subjectClients = subject.client_ids;
+  if (
+    !Array.isArray(subjectClients)
+    || subjectClients.length === 0
+    || subjectClients.some((id) => typeof id !== 'string' || id.trim() === '')
+  ) {
+    problems.push(`${where}.subject.client_ids is required: a non-empty list of client ids declared in CLIENTS_JSON`);
+  } else {
+    for (const id of subjectClients as string[]) {
+      if (!clientIds.has(id)) {
+        problems.push(`${where}.subject.client_ids names an unknown client ${JSON.stringify(id)}`);
+      }
+    }
+  }
+
+  const issuedBy = subject.issued_by_grants;
+  if (
+    !Array.isArray(issuedBy)
+    || issuedBy.length === 0
+    || issuedBy.some((grant) => !(SUBJECT_GRANTS as readonly unknown[]).includes(grant))
+    || new Set(issuedBy).size !== issuedBy.length
+  ) {
+    problems.push(
+      `${where}.subject.issued_by_grants must be a non-empty list of `
+      + `${SUBJECT_GRANTS.map((g) => JSON.stringify(g)).join(', ')} without repeats `
+      + '(client_credentials and token-exchange tokens are never exchangeable)',
+    );
+  }
+
+  // --- issue: the token that goes out -----------------------------------------
+  if (issue.token_type !== ACCESS_TOKEN_TYPE) {
+    problems.push(`${where}.issue.token_type must be "${ACCESS_TOKEN_TYPE}"`);
+  }
+
+  const issueAudience = issue.audience;
+  const issueResource = resources.find((resource) => resource.audience === issueAudience);
+  if (issueResource === undefined) {
+    problems.push(
+      `${where}.issue.audience ${JSON.stringify(issueAudience)} is not a declared resource audience `
+      + '(API_AUDIENCE or RESOURCE_SERVERS_JSON)',
+    );
+  }
+  if (subjectResource !== undefined && issueResource !== undefined) {
+    if (subjectResource === issueResource) {
+      problems.push(`${where}: subject.audience and issue.audience must differ`);
+    } else if (!issueResource.grants.includes('token-exchange')) {
+      problems.push(
+        `${where}.issue.audience ${JSON.stringify(issueResource.audience)}: `
+        + 'the resource does not list "token-exchange" in its grants',
+      );
+    }
+  }
+
+  const scope = issue.scope;
+  const scopeTokens = typeof scope === 'string' ? scope.split(' ') : [];
+  if (
+    scopeTokens.length === 0
+    || scopeTokens.some((token) => !RESOURCE_SCOPE_PATTERN.test(token))
+    || new Set(scopeTokens).size !== scopeTokens.length
+  ) {
+    problems.push(`${where}.issue.scope is required: space-separated scope tokens, no repeats`);
+  } else if (issueResource !== undefined) {
+    if (!scopeTokens.includes(issueResource.scope)) {
+      problems.push(
+        `${where}.issue.scope must contain ${JSON.stringify(issueResource.scope)}, the scope that selects the resource`,
+      );
+    }
+    // A resource without token-exchange has no exchange_scopes: already
+    // reported above, not repeated per scope.
+    if (issueResource.grants.includes('token-exchange')) {
+      const allowed = issueResource.exchange_scopes ?? [];
+      for (const token of scopeTokens) {
+        if (token !== issueResource.scope && !allowed.includes(token)) {
+          problems.push(
+            `${where}.issue.scope lists ${JSON.stringify(token)}, which is not in the exchange_scopes `
+            + `of the resource ${JSON.stringify(issueResource.audience)}`,
+          );
+        }
+      }
+    }
+  }
+
+  const ttl = issue.ttl_seconds;
+  if (typeof ttl !== 'number' || !Number.isInteger(ttl) || ttl <= 0 || ttl > MAX_EXCHANGE_TTL_SECONDS) {
+    problems.push(`${where}.issue.ttl_seconds must be a positive integer not above ${MAX_EXCHANGE_TTL_SECONDS}`);
+  }
+
+  if (issue.refresh_token !== false) {
+    problems.push(`${where}.issue.refresh_token must be false: exchanged tokens carry no refresh token`);
+  }
+
+  if (problems.length !== before) return undefined;
+  return {
+    subject: {
+      token_type: ACCESS_TOKEN_TYPE,
+      audience: subjectAudience as string,
+      client_ids: [...(subjectClients as string[])],
+      issued_by_grants: [...(issuedBy as SubjectGrant[])],
+    },
+    issue: {
+      token_type: ACCESS_TOKEN_TYPE,
+      audience: issueAudience as string,
+      scope: scope as string,
+      ttl_seconds: ttl as number,
+      refresh_token: false,
+    },
+    where,
+  };
+}
+
+/**
+ * A token exchange client (RFC 8693): confidential through private_key_jwt,
+ * the exchange grant only, no redirect, no secret, and at least one rule.
+ * There is no default exchange: what the client may trade for what is all in
+ * its `token_exchange` rules. Returns the rules, or undefined when the entry
+ * has to be dropped.
+ */
+function validateExchangeClient(
+  candidate: Record<string, unknown>,
+  where: string,
+  apiAudience: string | undefined,
+  resources: readonly AudienceResource[],
+  clientIds: ReadonlySet<string>,
+  problems: string[],
+): TokenExchangeRule[] | undefined {
+  const before = problems.length;
+
+  if (apiAudience === undefined) {
+    problems.push(`${where} uses grant_types ${TOKEN_EXCHANGE_GRANT_TYPE}, which requires API_AUDIENCE`);
+  }
+
+  const grantTypes = candidate.grant_types as unknown[];
+  if (grantTypes.length !== 1 || grantTypes[0] !== TOKEN_EXCHANGE_GRANT_TYPE) {
+    problems.push(
+      `${where}.grant_types must be exactly ["${TOKEN_EXCHANGE_GRANT_TYPE}"] for a token exchange client`,
+    );
+  }
+
+  const method = candidate.token_endpoint_auth_method;
+  if (typeof method !== 'string' || !EXCHANGE_AUTH_METHODS.includes(method)) {
+    problems.push(
+      `${where}.token_endpoint_auth_method must be ${EXCHANGE_AUTH_METHODS.join(', ')} `
+      + `for a token exchange client, got ${JSON.stringify(method)}`,
+    );
+  }
+
+  const jwks = candidate.jwks;
+  const keys = isPlainObject(jwks) ? jwks.keys : undefined;
+  if (
+    Array.isArray(keys)
+    && keys.some((key) => isPlainObject(key) && PRIVATE_JWK_MEMBERS.some((member) => member in key))
+  ) {
+    problems.push(`${where}.jwks must hold public keys only: the private key stays with the client`);
+  } else if (
+    !Array.isArray(keys)
+    || keys.length === 0
+    || keys.some((key) => !isPlainObject(key) || !PUBLIC_JWK_TYPES.includes(key.kty as string))
+  ) {
+    problems.push(`${where}.jwks is required for a token exchange client: {"keys":[<public JWK>]}`);
+  }
+
+  if (candidate.client_secret !== undefined) {
+    problems.push(`${where}.client_secret is not allowed for a token exchange client`);
+  }
+
+  const responseTypes = candidate.response_types;
+  if (!Array.isArray(responseTypes) || responseTypes.length !== 0) {
+    problems.push(`${where}.response_types must be [] for a token exchange client`);
+  }
+
+  const redirectUris = candidate.redirect_uris;
+  if (redirectUris !== undefined && !(Array.isArray(redirectUris) && redirectUris.length === 0)) {
+    problems.push(`${where}.redirect_uris must be absent or [] for a token exchange client`);
+  }
+
+  const entries = candidate.token_exchange;
+  const rules: TokenExchangeRule[] = [];
+  if (!Array.isArray(entries) || entries.length === 0) {
+    problems.push(`${where} has the token exchange grant but no token_exchange rules: there is no default exchange`);
+  } else {
+    entries.forEach((entry, index) => {
+      const rule = parseTokenExchangeRule(entry, `${where}.token_exchange[${index}]`, resources, clientIds, problems);
+      if (rule !== undefined) rules.push(rule);
+    });
+    // A request must match exactly one rule: two rules for the same pair of
+    // audiences would make that impossible, so it is refused here already.
+    const seen = new Set<string>();
+    for (const rule of rules) {
+      const pair = JSON.stringify([rule.subject.audience, rule.issue.audience]);
+      if (seen.has(pair)) {
+        problems.push(
+          `${where}.token_exchange has two rules for subject.audience ${JSON.stringify(rule.subject.audience)} `
+          + `and issue.audience ${JSON.stringify(rule.issue.audience)}: a request must match exactly one`,
+        );
+      }
+      seen.add(pair);
+    }
+  }
+
+  return problems.length === before ? rules : undefined;
+}
+
+/**
+ * The `scope` and `grants` of a resource entry, shared by DEFAULT_RESOURCE_JSON
+ * and RESOURCE_SERVERS_JSON. Pushes a problem for each defect; the caller
+ * keeps the entry only when none was added.
+ */
+function parseScopeAndGrants(
+  candidate: Record<string, unknown>,
+  where: string,
+  takenScopes: ReadonlySet<string>,
+  problems: string[],
+): ResourceScopeConfig {
+  const scope = typeof candidate.scope === 'string' ? candidate.scope.trim() : '';
+  if (scope === '') {
+    problems.push(`${where}.scope is required`);
+  } else if (!RESOURCE_SCOPE_PATTERN.test(scope)) {
+    problems.push(
+      `${where}.scope must be a single scope token (letters, digits, "_", ".", "-"), got ${JSON.stringify(candidate.scope)}`,
+    );
+  } else if (OIDC_SCOPES.includes(scope)) {
+    problems.push(
+      `${where}.scope ${JSON.stringify(scope)} is reserved (${OIDC_SCOPES.join(', ')} belong to OpenID Connect and cannot name a resource)`,
+    );
+  } else if (takenScopes.has(scope)) {
+    problems.push(
+      `${where}.scope ${JSON.stringify(scope)} is already used by another resource (DEFAULT_RESOURCE_JSON or RESOURCE_SERVERS_JSON)`,
+    );
+  }
+
+  const grants = candidate.grants;
+  const grantsValid = Array.isArray(grants)
+    && grants.length > 0
+    && grants.every((grant) => (RESOURCE_GRANTS as readonly unknown[]).includes(grant))
+    && new Set(grants).size === grants.length;
+  if (!grantsValid) {
+    problems.push(
+      `${where}.grants is required: a non-empty list of ${RESOURCE_GRANTS.map((g) => JSON.stringify(g)).join(', ')} `
+      + `without repeats, got ${JSON.stringify(grants)}`,
+    );
+  }
+
+  // Required with the token-exchange grant, refused without it: which scopes
+  // a delegated token may carry is a decision, never a built-in default.
+  // Not judged against a grants list that is already wrong.
+  const exchangeScopes = candidate.exchange_scopes;
+  const exchangeable = grantsValid && (grants as unknown[]).includes('token-exchange');
+  let parsedExchangeScopes: string[] | undefined;
+  if (!grantsValid) {
+    // Reported above.
+  } else if (!exchangeable) {
+    if (exchangeScopes !== undefined) {
+      problems.push(`${where}.exchange_scopes is only allowed when grants lists "token-exchange"`);
+    }
+  } else if (!Array.isArray(exchangeScopes) || exchangeScopes.length === 0) {
+    problems.push(
+      `${where}.exchange_scopes is required when grants lists "token-exchange": `
+      + `the scopes an exchanged token may carry besides ${JSON.stringify(scope)}`,
+    );
+  } else if (
+    exchangeScopes.some((token) => typeof token !== 'string' || !RESOURCE_SCOPE_PATTERN.test(token))
+    || new Set(exchangeScopes).size !== exchangeScopes.length
+  ) {
+    problems.push(
+      `${where}.exchange_scopes must be a list of scope tokens (letters, digits, "_", ".", "-") `
+      + `without repeats, got ${JSON.stringify(exchangeScopes)}`,
+    );
+  } else if (exchangeScopes.includes(scope)) {
+    problems.push(
+      `${where}.exchange_scopes must not list ${JSON.stringify(scope)}: `
+      + 'the scope that selects the resource is always carried',
+    );
+  } else if (exchangeScopes.some((token) => OIDC_SCOPES.includes(token as string))) {
+    problems.push(
+      `${where}.exchange_scopes must not list ${OIDC_SCOPES.join(', ')}: `
+      + 'they belong to OpenID Connect, not to an exchanged token',
+    );
+  } else {
+    parsedExchangeScopes = [...(exchangeScopes as string[])];
+  }
+
+  return {
+    scope,
+    grants: Array.isArray(grants) ? [...(grants as ResourceGrant[])] : [],
+    ...(parsedExchangeScopes === undefined ? {} : { exchange_scopes: parsedExchangeScopes }),
+  };
+}
+
+/**
+ * DEFAULT_RESOURCE_JSON: `{"scope":"…","grants":[…]}`, the API_AUDIENCE
+ * resource. Required with API_AUDIENCE and refused without it: who may ask
+ * for that resource by its scope is a decision, never a built-in default.
+ */
+function parseDefaultResource(
+  env: Env,
+  problems: string[],
+  apiAudience: string | undefined,
+): DefaultResourceConfig | undefined {
+  const name = 'DEFAULT_RESOURCE_JSON';
+  const parsed = parseJson(env, name, problems);
+  if (apiAudience === undefined) {
+    if (parsed !== undefined) {
+      problems.push(`${name} requires API_AUDIENCE (it describes the API_AUDIENCE resource)`);
+    }
+    return undefined;
+  }
+  if (parsed === undefined) {
+    if (!problems.some((p) => p.startsWith(name))) {
+      problems.push(
+        `${name} is required when API_AUDIENCE is set: {"scope":"<scope that selects the API_AUDIENCE resource>",`
+        + `"grants":[<${RESOURCE_GRANTS.map((g) => JSON.stringify(g)).join(' and/or ')} that may ask for it>]}`,
+      );
+    }
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    problems.push(`${name} must be a JSON object {"scope","grants"}`);
+    return undefined;
+  }
+  const candidate = parsed as Record<string, unknown>;
+  const before = problems.length;
+  const unknown = Object.keys(candidate).filter(
+    (key) => key !== 'scope' && key !== 'grants' && key !== 'exchange_scopes',
+  );
+  if (unknown.length > 0) {
+    problems.push(
+      `${name} has unknown fields: ${unknown.join(', ')} `
+      + '(only scope, grants and exchange_scopes; the audience is API_AUDIENCE)',
+    );
+  }
+  const resource = parseScopeAndGrants(candidate, name, new Set(), problems);
+  return problems.length === before ? resource : undefined;
+}
+
+/**
+ * RESOURCE_SERVERS_JSON: `[{"scope","audience","grants"}, ...]`. Absent =>
+ * none, and the API_AUDIENCE is the only resource exactly as before. Every
+ * entry must be complete: there is no default scope or audience.
+ */
+function parseResourceServers(
+  env: Env,
+  problems: string[],
+  apiAudience: string | undefined,
+  defaultResource: DefaultResourceConfig | undefined,
+): ResourceServerConfig[] {
+  const name = 'RESOURCE_SERVERS_JSON';
+  const parsed = parseJson(env, name, problems);
+  if (parsed === undefined) return [];
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    problems.push(`${name} must be a non-empty JSON array of {"scope","audience","grants"} objects`);
+    return [];
+  }
+  if (apiAudience === undefined) {
+    problems.push(
+      `${name} requires API_AUDIENCE (the default resource for a request that names none of these scopes)`,
+    );
+  }
+
+  const servers: ResourceServerConfig[] = [];
+  const scopes = new Set<string>(defaultResource === undefined ? [] : [defaultResource.scope]);
+  const audiences = new Set<string>(apiAudience === undefined ? [] : [apiAudience]);
+  parsed.forEach((entry, index) => {
+    const where = `${name}[${index}]`;
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      problems.push(`${where} must be an object`);
+      return;
+    }
+    const candidate = entry as Record<string, unknown>;
+    const before = problems.length;
+
+    const unknown = Object.keys(candidate).filter(
+      (key) => key !== 'scope' && key !== 'audience' && key !== 'grants' && key !== 'exchange_scopes',
+    );
+    if (unknown.length > 0) {
+      problems.push(
+        `${where} has unknown fields: ${unknown.join(', ')} (only scope, audience, grants and exchange_scopes)`,
+      );
+    }
+
+    const { scope, grants, exchange_scopes } = parseScopeAndGrants(candidate, where, scopes, problems);
+
+    const audience = typeof candidate.audience === 'string' ? candidate.audience.trim() : '';
+    if (audience === '') {
+      problems.push(`${where}.audience is required`);
+    } else if (audiences.has(audience)) {
+      problems.push(
+        `${where}.audience ${JSON.stringify(audience)} is already used `
+        + `(by another resource server or by API_AUDIENCE): one audience, one resource server`,
+      );
+    }
+
+    if (problems.length === before) {
+      scopes.add(scope);
+      audiences.add(audience);
+      servers.push({ scope, audience, grants, ...(exchange_scopes === undefined ? {} : { exchange_scopes }) });
+    }
+  });
+  return servers;
+}
+
+interface ParsedClients {
+  clients: ClientConfig[];
+  tokenExchange: Map<string, TokenExchangeRule[]>;
+  clientRequiredGroups: Map<string, readonly string[]>;
+}
+
+/** The CLIENTS_JSON field that restricts a user client to members of some AD groups. */
+export const REQUIRED_LDAP_GROUPS_FIELD = 'required_ldap_groups';
+
+/**
+ * Identity providers able to read a person's AD group membership. Only spnego
+ * talks to a directory; dev-stub and database have no notion of an AD group,
+ * so a client restricted to groups would be either unreachable or — far worse
+ * — silently unrestricted under them. Neither is acceptable: refused at start.
+ */
+const GROUP_AWARE_IDENTITY_PROVIDERS: readonly IdentityProviderName[] = ['spnego'];
+
+/**
+ * `required_ldap_groups` of a user client: a non-empty array of group DNs,
+ * each a non-empty string once trimmed. Returns the trimmed DNs, or undefined
+ * after pushing the problem.
+ */
+function parseRequiredLdapGroups(
+  value: unknown,
+  where: string,
+  problems: string[],
+): readonly string[] | undefined {
+  const field = `${where}.${REQUIRED_LDAP_GROUPS_FIELD}`;
+  if (
+    !Array.isArray(value)
+    || value.length === 0
+    || value.some((group) => typeof group !== 'string' || group.trim() === '')
+  ) {
+    problems.push(
+      `${field} must be a non-empty array of group DNs (non-empty strings), got ${JSON.stringify(value)}`,
+    );
+    return undefined;
+  }
+  return value.map((group) => (group as string).trim());
+}
+
+function parseClients(
+  env: Env,
+  problems: string[],
+  apiAudience: string | undefined,
+  resources: readonly AudienceResource[],
+  identityProvider: IdentityProviderName,
+): ParsedClients {
+  const resourceScopes: readonly ResourceScopeConfig[] = resources;
+  const tokenExchange = new Map<string, TokenExchangeRule[]>();
+  const clientRequiredGroups = new Map<string, readonly string[]>();
   const parsed = parseJson(env, 'CLIENTS_JSON', problems);
   if (parsed === undefined) {
     if (!problems.some((p) => p.startsWith('CLIENTS_JSON'))) {
       problems.push('CLIENTS_JSON is required (JSON array of client registrations)');
     }
-    return [];
+    return { clients: [], tokenExchange, clientRequiredGroups };
   }
   if (!Array.isArray(parsed) || parsed.length === 0) {
     problems.push('CLIENTS_JSON must be a non-empty JSON array');
-    return [];
+    return { clients: [], tokenExchange, clientRequiredGroups };
   }
+
+  // Every declared client id, for subject.client_ids of the exchange rules.
+  const clientIds = new Set<string>(
+    parsed
+      .filter((entry) => isPlainObject(entry) && typeof entry.client_id === 'string' && entry.client_id.trim() !== '')
+      .map((entry) => (entry as { client_id: string }).client_id),
+  );
 
   const clients: ClientConfig[] = [];
   parsed.forEach((entry, index) => {
@@ -330,6 +1095,39 @@ function parseClients(env: Env, problems: string[]): ClientConfig[] {
       problems.push(`${where}.client_id is required`);
       return;
     }
+    if (candidate.token_exchange !== undefined && !isExchangeClient(candidate)) {
+      problems.push(`${where}.token_exchange requires grant_types ["${TOKEN_EXCHANGE_GRANT_TYPE}"]`);
+      return;
+    }
+    // A machine (client_credentials) or a service (token exchange) has no
+    // person behind its own login: a group restriction there would restrict
+    // nobody, which is a misreading of the configuration, never a choice.
+    if (
+      candidate[REQUIRED_LDAP_GROUPS_FIELD] !== undefined
+      && (isMachineClient(candidate) || isExchangeClient(candidate))
+    ) {
+      problems.push(
+        `${where}.${REQUIRED_LDAP_GROUPS_FIELD} is only allowed on a user client (redirect_uris): `
+        + 'a machine-to-machine or token exchange client has no person to check',
+      );
+      return;
+    }
+    if (isMachineClient(candidate)) {
+      if (validateMachineClient(candidate, where, apiAudience, resourceScopes, problems)) {
+        clients.push(candidate as unknown as ClientConfig);
+      }
+      return;
+    }
+    if (isExchangeClient(candidate)) {
+      const rules = validateExchangeClient(candidate, where, apiAudience, resources, clientIds, problems);
+      if (rules !== undefined) {
+        // oidc-provider would strip it anyway; the rules live in Config.tokenExchange.
+        const { token_exchange: _rules, ...metadata } = candidate;
+        clients.push(metadata as unknown as ClientConfig);
+        tokenExchange.set(candidate.client_id as string, rules);
+      }
+      return;
+    }
     const redirectUris = candidate.redirect_uris;
     if (
       !Array.isArray(redirectUris)
@@ -339,9 +1137,60 @@ function parseClients(env: Env, problems: string[]): ClientConfig[] {
       problems.push(`${where}.redirect_uris must be a non-empty array of strings`);
       return;
     }
+    // Optional for a user client; when present it is the allow-list
+    // oidc-provider enforces, and the only way to reach a resource server.
+    if (candidate.scope !== undefined) {
+      const tokens = typeof candidate.scope === 'string' ? candidate.scope.split(' ') : [];
+      // Scopes a person can never obtain: every resource not open to
+      // authorization_code.
+      const machineOnly = resourceScopes
+        .filter((resource) => !resource.grants.includes('authorization_code'))
+        .map((resource) => resource.scope);
+      const reserved = tokens.filter((token) => machineOnly.includes(token));
+      if (reserved.length > 0) {
+        problems.push(
+          `${where}.scope lists ${reserved.map((r) => JSON.stringify(r)).join(', ')}, `
+          + 'not open to authorization_code: a user client can never obtain it',
+        );
+        return;
+      }
+      const allowed = [
+        ...OIDC_SCOPES,
+        ...resourceScopes
+          .filter((resource) => resource.grants.includes('authorization_code'))
+          .map((resource) => resource.scope),
+      ];
+      if (tokens.length === 0 || tokens.some((token) => !allowed.includes(token))) {
+        problems.push(
+          `${where}.scope must list scopes among ${allowed.map((a) => JSON.stringify(a)).join(', ')} `
+          + `(space-separated), got ${JSON.stringify(candidate.scope)}`,
+        );
+        return;
+      }
+    }
+    // --- per-client LDAP group restriction (1.3.0) -------------------------
+    if (candidate[REQUIRED_LDAP_GROUPS_FIELD] !== undefined) {
+      const groups = parseRequiredLdapGroups(candidate[REQUIRED_LDAP_GROUPS_FIELD], where, problems);
+      if (groups === undefined) return;
+      if (!GROUP_AWARE_IDENTITY_PROVIDERS.includes(identityProvider)) {
+        problems.push(
+          `${where}.${REQUIRED_LDAP_GROUPS_FIELD} requires IDENTITY_PROVIDER=spnego: `
+          + `with ${identityProvider} no AD group membership can be read, and the restriction `
+          + 'would otherwise be silently ignored',
+        );
+        return;
+      }
+      // oidc-provider would strip it anyway; the groups live in
+      // Config.clientRequiredGroups, read by the client_ldap_group gate.
+      const { [REQUIRED_LDAP_GROUPS_FIELD]: _groups, ...metadata } = candidate;
+      clients.push(metadata as unknown as ClientConfig);
+      clientRequiredGroups.set(candidate.client_id as string, groups);
+      return;
+    }
+    // --- end per-client LDAP group restriction -----------------------------
     clients.push(candidate as unknown as ClientConfig);
   });
-  return clients;
+  return { clients, tokenExchange, clientRequiredGroups };
 }
 
 function parseDevStubUsers(
@@ -639,6 +1488,25 @@ export function loadConfig(env: Env = process.env): Config {
   }
   // --- end phase 4-bis -----------------------------------------------------
 
+  const defaultResource = parseDefaultResource(env, problems, trimmed(env, 'API_AUDIENCE'));
+  const resourceServers = parseResourceServers(
+    env,
+    problems,
+    trimmed(env, 'API_AUDIENCE'),
+    defaultResource,
+  );
+  const apiAudience = trimmed(env, 'API_AUDIENCE');
+  // Resources first, clients after: a client is checked against what was declared.
+  const resources: AudienceResource[] = [
+    ...(defaultResource === undefined || apiAudience === undefined
+      ? []
+      : [{ ...defaultResource, audience: apiAudience }]),
+    ...resourceServers,
+  ];
+  // Parsed in its place inside the literal below, so the order of the
+  // problems in a ConfigError stays the order of the parameters.
+  let parsedClients: ParsedClients | undefined;
+
   const config: Config = {
     issuerUrl,
     port: optionalInteger(env, 'PORT', 3000, problems),
@@ -656,12 +1524,16 @@ export function loadConfig(env: Env = process.env): Config {
     devStubRealm,
     realm: realm ?? '',
 
-    clients: parseClients(env, problems),
+    clients: (parsedClients = parseClients(env, problems, apiAudience, resources, identityProvider)).clients,
+    tokenExchange: parsedClients.tokenExchange,
+    clientRequiredGroups: parsedClients.clientRequiredGroups,
 
     accessTokenTtl: optionalInteger(env, 'ACCESS_TOKEN_TTL', 3600, problems),
     refreshTokenTtl: optionalInteger(env, 'REFRESH_TOKEN_TTL', 43200, problems),
 
     apiAudience: trimmed(env, 'API_AUDIENCE'),
+    resourceServers,
+    ...(defaultResource === undefined ? {} : { defaultResource }),
 
     kerberos: {
       keytabPath: trimmed(env, 'KRB5_KTNAME'),

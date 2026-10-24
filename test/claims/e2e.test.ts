@@ -66,7 +66,9 @@ async function harness(
     env: {
       ...CLAIMS_ON,
       ...(options.enabled === false ? { CLAIMS_SQL_ENABLED: 'false' } : {}),
-      ...(options.apiAudience === false ? {} : { API_AUDIENCE }),
+      ...(options.apiAudience === false
+        ? {}
+        : { API_AUDIENCE, DEFAULT_RESOURCE_JSON: '{"scope":"api","grants":["client_credentials"]}' }),
     },
     sqlDriver: driver,
     logger: capture.logger,

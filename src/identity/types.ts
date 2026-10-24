@@ -52,6 +52,12 @@ export const CHALLENGE_REASONS = [
   'sso_failed',
   /** Phase 4: credentials were fine, the external SQL check said no. */
   'sql_group_check_failed',
+  /**
+   * 1.3.0: the account is alive, but it is not a direct member of any of the
+   * `required_ldap_groups` of the client asking for it. Other clients are not
+   * affected. Shown openly: it is only reached after the credentials passed.
+   */
+  'client_group_not_allowed',
   // --- phase 4-bis ---------------------------------------------------------
   /**
    * Phase 4-bis: the password was right, but the user has no usable TOTP seed
@@ -98,7 +104,12 @@ export function asChallengeReason(reason: string): ChallengeReason {
  * refusal into `account_disabled`.
  */
 export type IdentityAccountStatus =
-  | { active: true }
+  /**
+   * `memberOf`: the account's direct AD group memberships, raw, as read during
+   * this very check. Present only from a provider that can read groups
+   * (spnego); absent means "this provider cannot tell", never "no groups".
+   */
+  | { active: true; memberOf?: readonly string[] }
   | { active: false; reason: string };
 
 export interface ChallengeOptions {

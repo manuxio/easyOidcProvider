@@ -10,7 +10,12 @@
  *  - the OIDC/OAuth claims this server or oidc-provider puts in a token on its
  *    own: `auth_time`, `azp`, `client_id`, `scope`, `sid`;
  *  - the two claims that are OURS: `realm` and `preferred_username`, both
- *    emitted from the AD identity, both documented in the claim catalogue.
+ *    emitted from the AD identity, both documented in the claim catalogue;
+ *  - the delegation claims of RFC 8693 §4.1 and §4.4: `act` and `may_act`.
+ *    Only this server writes them — `act` on a token issued by the
+ *    token-exchange grant, naming the client acting for the user — and a
+ *    column aliased `act` in a person's token would forge a delegation the
+ *    resource servers trust.
  *
  * `name` is NOT reserved. It is a registered OIDC claim (Core §5.1, "End-User's
  * full name in displayable form") and the customer's query uses it in exactly
@@ -41,6 +46,9 @@ export const RESERVED_CLAIM_NAMES: readonly string[] = [
   // This server's own claims, from the Active Directory identity.
   'realm',
   'preferred_username',
+  // RFC 8693 delegation claims, written only by the token-exchange grant.
+  'act',
+  'may_act',
 ];
 
 const RESERVED_LOWERCASE: ReadonlySet<string> = new Set(

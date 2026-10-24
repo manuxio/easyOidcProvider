@@ -419,6 +419,7 @@ describe('SpnegoIdentityProvider.challenge', () => {
       'temporarily_unavailable',
       'ntlm_not_supported',
       'sso_failed',
+      'client_group_not_allowed',
     ] as const) {
       const res = fakeResponse();
       await provider().challenge(fakeRequest(), res as never, {

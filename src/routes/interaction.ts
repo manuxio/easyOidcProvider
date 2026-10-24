@@ -65,6 +65,13 @@ export function createInteractionRouter(options: InteractionRouterOptions): Rout
    * demands an interaction for every `native` client (the `native_client_prompt`
    * check, which is exactly what makes loopback redirect URIs legal). It costs
    * one silent redirect and keeps the standard policy intact.
+   *
+   * No gate runs here, and none is needed (1.3.0, required_ldap_groups): a
+   * consent interaction only exists after oidc-provider's load_grant step ran
+   * for this client and this account, and that step calls loadExistingGrant
+   * (src/provider/index.ts), which runs the gates of a group-restricted client
+   * whenever the session was not opened by a login of this same flow. When it
+   * was, handle() below has just run them with this clientId.
    */
   async function grantConsent(
     req: Request,
@@ -219,6 +226,8 @@ export function createInteractionRouter(options: InteractionRouterOptions): Rout
     }
     // --- end phase 4-bis ---------------------------------------------------
 
+    // clientId is what lets a client's required_ldap_groups (1.3.0) apply to
+    // this login: the client_ldap_group gate is keyed on it.
     const verdict = await runAccountGates(
       gates,
       { principal: outcome.principal, username, stage: 'login', clientId },
@@ -323,8 +332,15 @@ function readField(req: Request, name: string): string {
  * Express 5 forwards a rejected promise to the error handler on its own, but an
  * expired or replayed interaction cookie is an ordinary event, not a fault:
  * it gets its own answer instead of a stack trace.
+ *
+ * oidc-provider signals it with `SessionNotFound`, a subclass of
+ * `InvalidRequest`: its `message` is the OAuth code `invalid_request` and the
+ * "interaction session ..." text lives in `error_description`. The error is
+ * therefore recognised by its `name`, or by that text in either field.
+ *
+ * Exported for the unit test only.
  */
-function asyncRoute(
+export function asyncRoute(
   handler: (req: Request, res: Response) => Promise<void>,
   log: Logger,
 ) {
@@ -333,9 +349,15 @@ function asyncRoute(
       await handler(req, res);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const expired = /interaction session/i.test(message);
+      const fields = (typeof error === 'object' && error !== null ? error : {}) as Record<string, unknown>;
+      const name = typeof fields.name === 'string' ? fields.name : undefined;
+      const description = typeof fields.error_description === 'string' ? fields.error_description : '';
+      const expired =
+        name === 'SessionNotFound' ||
+        /interaction session/i.test(message) ||
+        /interaction session/i.test(description);
       log.warn(
-        { err: { message }, expired, path: req.path },
+        { err: { name, message }, expired, path: req.path },
         expired ? 'interaction session no longer valid' : 'interaction failed',
       );
       if (res.headersSent) return;
