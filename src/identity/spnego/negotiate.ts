@@ -108,8 +108,11 @@ export function toHostBasedServiceName(serviceName: string): string {
 export function toBindIdentity(rawUsername: string, realm: string): string | undefined {
   const value = rawUsername.trim();
   if (value === '' || value.length > 256) return undefined;
-  // No control characters and no whitespace anywhere, including the NETBIOS half.
-  if (/[\u0000-\u001f\u007f\s]/.test(value)) return undefined;
+  // No control characters anywhere, including the NETBIOS half. The plain space
+  // is the one whitespace AD admits inside a sAMAccountName ("mario rossi"); every
+  // other whitespace (tab, NBSP, line breaks) is still refused.
+  if (/[\u0000-\u001f\u007f]/.test(value)) return undefined;
+  if (/[^\S ]/.test(value)) return undefined;
 
   // The one backslash a user is allowed to type is the NETBIOS separator, and
   // only the part after it survives: everything downstream is a UPN.
@@ -124,6 +127,8 @@ export function toBindIdentity(rawUsername: string, realm: string): string | und
     // Already a UPN. Exactly one @, and something on both sides.
     const parts = local.split('@');
     if (parts.length !== 2 || parts[0] === '' || parts[1] === '') return undefined;
+    // A realm is a DNS name: the space is admitted only in the account half.
+    if (parts[1]!.includes(' ')) return undefined;
     return local;
   }
 

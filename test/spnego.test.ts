@@ -201,10 +201,22 @@ describe('principal mapping', () => {
     );
   });
 
+  it('admits the plain space AD allows inside an account name', () => {
+    expect(toBindIdentity('mario rossi', REALM)).toBe(`mario rossi@${REALM}`);
+    expect(toBindIdentity('LAB\\mario rossi', REALM)).toBe(`mario rossi@${REALM}`);
+    expect(toBindIdentity('  mario rossi  ', REALM)).toBe(`mario rossi@${REALM}`);
+    expect(toBindIdentity('mario rossi@LAB.EASYOIDC.LOCAL', REALM)).toBe(
+      'mario rossi@LAB.EASYOIDC.LOCAL',
+    );
+    expect(sAMAccountNameOf('LAB\\Mario Rossi')).toBe('mario rossi');
+  });
+
   it('refuses anything that could not be an account name', () => {
-    // DN punctuation, spaces and control characters never reach a bind.
+    // DN punctuation, whitespace other than the plain space and control characters never reach a bind.
     expect(toBindIdentity('cn=admin,dc=lab', REALM)).toBeUndefined();
-    expect(toBindIdentity('mario rossi', REALM)).toBeUndefined();
+    expect(toBindIdentity('mario\trossi', REALM)).toBeUndefined();
+    expect(toBindIdentity('mario rossi', REALM)).toBeUndefined();
+    expect(toBindIdentity('mario rossi@LAB EASYOIDC.LOCAL', REALM)).toBeUndefined();
     expect(toBindIdentity('mario*', REALM)).toBeUndefined();
     expect(toBindIdentity('a@b@c', REALM)).toBeUndefined();
     expect(toBindIdentity('', REALM)).toBeUndefined();
